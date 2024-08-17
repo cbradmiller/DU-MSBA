@@ -1,5 +1,5 @@
 # DU-MSBA
-Repo to store and share work I did in grad school
+Repo to store and share work I did in grad school. Will continue to add (08/17/2024)
 
 
 **JRE_Transcript_Exploration.qmd - R QMD file eploring the Joe Rogan Podcast. I pulled hundreds of Joe Rogan episode transcripts from a few different websites and analyzed the content and discussions.
