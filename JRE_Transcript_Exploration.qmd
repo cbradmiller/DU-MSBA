@@ -1,0 +1,682 @@
+---
+title: "A Text Analysis of the Joe Rogan Experience Podcast"
+author: "Brad Miller"
+editor: visual
+to: pdf
+echo: true
+date: 'November 21, 2023'
+format: pdf
+engine: pdflatex
+output: pdf_document
+---
+
+
+```{r knitr-options, include = FALSE}
+knitr::opts_chunk$set(fig.align="center",
+                      fig.height=3.66,
+                      fig.width=6,
+                      warning = FALSE,
+                      message = FALSE,
+                      comment = NA)
+```
+
+```{r,message=FALSE}
+#install.packages(tinytex)
+library(rvest)
+library(tidyverse)
+library(dplyr)
+library(vip)
+library(textdata)
+library(data.table)
+library(tidytext)
+library(textrecipes)
+library(igraph)
+library(ggraph)
+library(rsample)
+library(recipes)
+library(parsnip)
+library(tidymodels)
+library(splitstackshape)
+library(knitr)
+library(psych)
+library(rstatix)
+library(ggrepel)
+```
+# Introduction
+
+  I am an on-and-off listener of the Joe Rogan Experience podcast. I started listening 4+ years ago when I was looking for information on nutrition & exercise, and came across an episode with Dr. Rhonda Patrick. Listening to that episode was extremely informative, and The Joe Rogan Experience is now often in my podcast line-up when there are new episodes focusing on exercise and/or nutrition. If you are not familiar with the Joe Rogan Experience, the variety of topics discussed on the podcast is extremely wide. There are political discussions with pundits & politicians, discussions with archaeologists about human origins, conversations with doctors & biologists about how diet & exercise will improve your life, and much much more (UFO discussions).
+
+
+  However, there have been multiple occasions while listening to the podcast where I felt like I had heard the exact same conversation before. For example, I know that Dr. Rhonda Patrick is going to talk about Sulforaphane, a chemical produced when chewing cruciferous vegetables, every single time she is on the show. I've noticed that other guests also have subjects they like to bring up. So, when guests appear on the show, do they talk about the same thing every time? Can we build a machine which can predict who the guest is by using the transcript of an episode? Speaking from a listener's perspective, knowing how predictable an episode will be could be helpful is deciding whether or not to listen.
+
+
+# Data Description
+
+  In order to perform this analysis & answer these questions, I have pulled the transcripts for 356 episodes of The Joe Rogan Experience. I was originally hoping to get ~1000 episodes, but scraping these few hundred took long enough as it stands. The data I was able to pull for each episode is below
+
+-   **Episode_Name**: This is the episode number & the guest(s) name in the following format "Episode Number - Guest(s) Name"
+-   **Transcript**: The full transcript of the episode. This is every single word, and sentence spoken in the episode in the order it was spoken in one continous feed. I do not know which guest said which line.
+
+I have also created two new columns by splitting the Episode_Name column apart.
+
+-   **Episode**: The Episode Number. This is helpful to have when trying to track data & trends over the lifetime of the show. JRE now has over 2000 episodes, and I imagine it changed over time.
+-   **Guest**: The name of the guest alone. **This is the variable we will be predicting.**
+
+Below you can see the top few rows of the data we will be using.
+
+```{r, message = FALSE}
+JRE_Final <- read_csv('Aggregated_Transcripts_2.csv')
+JRE_Final <- JRE_Final %>%
+  select(Episode_Name,Transcript,Episode,Guest,Source)
+JRE_Final <- JRE_Final %>%
+  mutate(Transcript = gsub('\r\n',' ',Transcript))
+
+JRE_Final$Guest <- as.factor(JRE_Final$Guest)
+JRE_Final %>% head()
+
+
+```
+
+## Data Sources
+
+  I scraped these transcripts from 3 websites: HappyScribe, OGJRE, and JREScribe. I used Selenium & the rvest library. The typical process for each website was to use Selenium to navigate through the websites to pages which contained the transcripts, I'd then save the URL of that page to a list, and then I'd come back with rvest to pull the actual transcript & Episode Name.
+
+As you can see below, the majority of the transcripts came from JREScribe.
+
+```{r}
+JRE_Final %>% 
+  count(Source)%>% 
+  arrange(desc(Source)) %>%
+  mutate(prop = n / sum(n) *100) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop ) %>% 
+  ggplot(aes(x="", y=prop, fill=Source)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.position="right") +
+  geom_text(aes(y = ypos, label = n), color = "white", size=6) + 
+  scale_fill_brewer(palette="Dark2")
+```
+
+# Data Exploration
+
+Before getting into any text analysis, I'd like to explore this data set in order to understand these transcripts.
+
+For the initial exploration of these transcripts I have unnested our transcripts, creating a new row for every word in every single episode.This makes our dataset almost 10 million rows long. Below is a quick view of how this data is now arranged.
+
+I apologize for Joe Rogan's language below.
+
+```{r}
+#length(JRE_Final$Episode_Name)
+words_by_episode <- JRE_Final %>%
+  unnest_tokens(word, Transcript)
+words_by_episode %>% 
+  head() %>% 
+  kable()
+```
+
+## Word Count
+
+I will start this data exploration with a word count.
+
+I think it is important to understand the number of words spoken during an episode because The Joe Rogan Experience is known to be an extremely long podcast. According to a Google search I just performed, the average length of an episode is 2 hours & 37 minutes, and the show has been know to often go on much longer. A 3-hour podcast could contain many subjects of conversation & a wide variety of vocabulary.
+
+When we group by episode and count the words we see that the average episode has 27,971 words spoken.
+
+```{r}
+
+word_count <- words_by_episode %>% 
+  group_by(Episode) %>% 
+ # count(Source,Episode, name = "total_words") %>%
+  summarize(total_words = n())
+
+word_count %>% 
+  summarize(avg_count=mean(total_words)) %>% 
+  kable()
+```
+
+### Histogram
+What is the distribution of word count by episode?
+
+Below is a histogram of our word count by episode. The average is represented with the red vertical line.
+
+This does show a nice close-to-normal distribution. It is interesting that there are episodes containing close to zero words. I have to wonder if this is an error which occurred during the web scraping process.
+
+```{r, message = FALSE}
+counts <- words_by_episode %>% 
+  group_by(Source,Episode) %>% 
+  summarize(total_words = n())
+
+words_by_episode %>% 
+  count(Episode_Name, name = "total_words") %>%
+  ggplot(aes(total_words)) +
+  geom_histogram(fill = "midnightblue") +
+  geom_vline(xintercept=mean(counts$total_words),color="red")
+
+
+```
+
+### Scatter Plot
+
+How has the number of words spoken during the podcast varied over the course of the life of the podcast?
+
+Below is a scatter plot of word count in each episode, colored by the data source. Our X axis is the episode number, and the Y is the word count. Each of the websites I pulled transcripts from seems to cover a different period of time during the podcast's lifetime.
+
+```{r}
+counts %>% 
+  ggplot(aes(x=Episode,y=total_words)) +
+  geom_point(aes(color=Source)) +
+  geom_hline(yintercept=mean(counts$total_words),color="red") +
+  geom_smooth(method = "lm")
+```
+
+The blue trend line indicates that episodes are getting longer, at least in terms of word count, and the horizontal red line marks the average number of words per episode listed above (27,971 words).
+
+
+## Guests Exploration
+
+Who does Joe Rogan speak with on his show?
+
+Below you can see that within this dataset, there are 282 unique guests. Given the fact that I pulled 356 different episodes, this means some of the guests were on multiple episodes. I'm actually glad to see this, as it would be very difficult to predict the guest if there were not repeat guests.
+
+```{r}
+JRE_Final %>%
+  select(Guest) %>%
+  summarize(Num_Unique_guests = n_distinct(Guest)) %>% 
+  kable()
+```
+
+### Bar chart displaying Number of appearances by Guest.
+
+Since we know there are repeat guests, we should get an idea of how many times a guest has appeared.
+
+Below is a bar graph of our top 20 guests in order by number of appearances. We can see that some guests within just these 356 episodes have been on the show up to 5 times. Joe Rogan does seem to produce \~3 episodes per week, and I imagine that would be tough to do if he didn't have a line-up of regulars.
+
+```{r}
+JRE_Final %>%
+  select(Guest, Episode_Name) %>%
+  group_by(Guest) %>%
+  summarize(Num_Appearances = n()) %>%
+  arrange(desc(Num_Appearances)) %>%
+  slice_head(n=20) %>% 
+  ggplot(aes(x=Num_Appearances, y=reorder(Guest, Num_Appearances),fill = Num_Appearances)) + 
+  geom_bar(stat = "identity") +
+  ylab("Guest Name") +
+  xlab("Number of Appearances on JRE")
+```
+
+### Pie Chart of Guests by Number of Appearances
+
+Given that so many guests have been on multiple times, what percent of our dataset is made up of repeat guests? We'll need to know this if we intend to build a good training dataset to predict Guest.
+
+Below we can see that 34% of the guests in our data set have been on the show at least 2 times. This comes out to be 95 different people.
+
+```{r}
+guests_counted <- JRE_Final %>%
+  select(Guest, Episode_Name) %>%
+  group_by(Guest) %>%
+  summarize(Num_Appearances = n()) %>%
+  mutate(perc = Num_Appearances/sum(Num_Appearances)) %>%
+  mutate(labels = percent(perc))
+counted_grouped <- guests_counted  %>% 
+  mutate(Number = ifelse(Num_Appearances >1,"Multiple Appearances","1 Appearance")) %>% 
+  group_by(Number) %>% 
+  summarize(perc = sum(perc)) 
+counted_grouped %>%
+  ggplot(aes(x="", y=perc, fill=Number)) +
+  geom_bar(stat="identity", width=1) +
+  geom_text(aes(label = percent(perc)),
+             position = position_stack(vjust = 0.5),
+             show.legend = FALSE) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.position="right")
+```
+
+# Text Analysis
+With our initial exploration of the data set complete, I will move into an analysis on the transcripts themselves. I want to understand the sentiment of the transcripts and how that relates to the guests. I also want to understand what words and phrases are being used and how important they are within the episodes to the guests on the show.
+
+## Sentiment Analysis
+
+In this section I will be doing a sentiment analysis both on the data set overall and on the individual guest. I've been wondering if we can build a sort of "Sentimental Profile" which can be used to track guests across their episodes.
+
+### Sentiment by Episode
+
+Below is a scatter plot of the summed sentimental value of every JRE episode. This is using the Afinn sentiment data set, which is a data set of words and their associated sentimental value, which is represented by a positive or negative integer. For example, the word 'battle' is considered to be more negative than it is positive, so its value is -1, whereas the word 'strength' is considered more positive and gets a +2.
+
+By summing the sentiment by episode, we get a total sentimental value for that episode. Below we can see that episodes tend to be more positive than they are negative, and that the podcast seems to be getting more positive over time.
+
+```{r, message = FALSE, Warnings=FALSE}
+words_by_episode %>%
+inner_join(get_sentiments("afinn"),
+            relationship = "many-to-many") %>%
+  group_by(Episode_Name, Episode) %>%
+  summarize(sum_sent = sum(value)) %>%
+  ggplot(aes(x=Episode,y=sum_sent, col=sum_sent)) +
+  geom_point(stat='identity') +
+  scale_color_distiller(palette = "YlGnBu") +
+  geom_smooth(method="lm") +
+  ylab("Summed Sentimental Value")
+
+```
+
+However, the trendline in the scatter plot is extremely reminiscent of the one in the word count we did previously. So, is the podcast getting more positive, or are people just talking more?
+
+In order to further investigate this I have calculated two correlations. The first is between the word count of each episode & its summed sentiment. The second is also between the word count of each episode & the *absolute value* of its summed sentiment. The reason for the second is because of my idea of sentimental profiles for the guests. Some guests might have a lexicon which tends to be more negative, and if given the opportunity to speak more they will utilize a greater volume of negative words. This would look like a negative correlation (more words -\> decreasing sentiment), whereas a speaker with a more positive lexicon would have a positive correlation (more words -\> increasing sentiment). By taking the absolute value of sentiment we can more accurately measure this correlation.
+.
+
+```{r,message=FALSE}
+w_sent <- words_by_episode %>%
+inner_join(get_sentiments("afinn"),
+            relationship = "many-to-many")
+
+w_sum_sent <- w_sent %>%
+group_by(Episode_Name, Guest) %>%
+summarize(sum_sent = sum(value))
+
+word_count <- words_by_episode %>% 
+  count(Episode_Name, name = "total_words")
+
+sent_count <- merge(x = word_count, y = w_sum_sent, by = "Episode_Name")
+
+
+print(paste0("Word Count - Sentiment Correlation: ",cor(sent_count$total_words, sent_count$sum_sent)))
+print(paste0("Word Count - Absolute Value of Sentiment Correlation: ",cor(sent_count$total_words, abs(sent_count$sum_sent))))
+```
+I am not surprised that both of these correlations are positive. The correlation of .418 indicates a medium-strength correlation. So, we can't say definitively whether the episodes are getting more positive, or if the episodes are just getting longer
+
+
+### Proportional Sentiment by Episode
+
+In order to find out if the podcast is actually becoming more positive or if more words are being spoken, I have built out another scatter plot, but this time with the Bing sentiment dataset. The Bing dataset only tells us if a word has a positive or negative sentiment, it does not give us a value for that sentiment.
+
+The below scatter plot shows us the proportion of positive to negative words in an episode. Because this is a proportion and not a summed value, the total number of words spoken should not affect an episode's score.
+
+The based on the trendline in the plot below, we can now say that the Joe Rogan Experience is becoming proportionally more positive than it is negative as time goes on.
+
+```{r,message=FALSE}
+
+Sent_Prop <- words_by_episode %>%
+inner_join(get_sentiments("bing"),
+            relationship = "many-to-many") %>% 
+  mutate(positive = ifelse(sentiment=="positive",1,0)) %>% 
+  mutate(negative = ifelse(sentiment=="negative",1,0)) %>%
+  group_by(Episode_Name,Episode) %>% 
+  summarize(tot_pos = sum(positive), tot_neg = sum(negative)) %>% 
+  mutate(prop = tot_pos/tot_neg)
+
+Sent_Prop %>% 
+  ggplot(aes(x=Episode,y=prop, col=prop)) +
+  geom_point(stat='identity') +
+  scale_color_distiller(palette = "YlGnBu") +
+  geom_smooth(method="lm") +
+  ylab("Proportion of Positive to Negative Words")
+  
+```
+
+#### Top 5 Most Positive Episodes
+
+Below are the top 5 episodes in order of proportional sentiment. From a lexicon view, these should be the most proportionally positive episodes.
+
+This doesn't add to the analysis, but if you are looking for any episodes to listen to these might be a good starting point.
+
+```{r}
+
+Sent_Prop  %>%
+  select(Episode_Name, prop) %>% 
+arrange(desc(prop)) %>% 
+  head(5)
+```
+
+#### Top 5 Most Negative Episodes
+
+Below are the top 5 episodes most negative episodes. These episodes have the lowest proportion of positive to negative words.
+
+I've listened to the David Goggins episode, and I would recommend it to anyone. The porportional sentiment might be negative, but that episode might be a good example of negative reinforcement. You might feel like going on an extra run after listening to it.
+
+```{r}
+Sent_Prop  %>%
+  select(Episode_Name, prop) %>% 
+arrange(desc(-prop))  %>% 
+  head(5)
+```
+
+### Guest Sentimental & Word Count Profile
+
+So can we build a profile for the guests based of the sentimental value of their episodes? Based off the length of the episodes in terms of word count?
+
+To answer this, I built out the scatter plot below. This plot has proportional sentiment on the X axis, and word count on the Y axis. Guests are plotted based on their average proportional sentiment & their average word count.
+
+```{r}
+merged_Sent<- merge(x=sent_count, y=Sent_Prop,on=Episode_Name)
+merged_Sent_agg <- merged_Sent %>% 
+  group_by(Guest)%>%
+  summarize(avg_sent = mean(sum_sent),avg_Prop = mean(prop),avg_words = mean(total_words)) %>%
+  arrange(desc(avg_Prop))
+Guests_counted <- guests_counted %>% 
+  select(Guest, Num_Appearances)
+merged_Sent_count<- merge(x=merged_Sent_agg, y=Guests_counted,on=Guest)
+merged_Sent_count %>% 
+  filter(Num_Appearances ==2) %>%
+  arrange(desc(avg_Prop)) %>%
+  ggplot(aes(x=avg_Prop,y=avg_words, col=Guest)) +
+  geom_point(stat='identity')  +
+  geom_text_repel(aes(label = Guest)) + theme(legend.position="none") +
+  xlab("Average Proportional Sentiment") +
+  ylab("Average Word Count")
+```
+To prevent displaying an over-crowded plot, this only looks at Guests who have been on the show exactly two times. The further to the right a guest is, the more proportionally positive they tend to be, and the higher up in the chart they are the more words their episodes tend to contain.
+
+It appears that there are some guests who have distinctive avg_Prop & avg_words combinations, like Tom Greene & Post Malone, but for most guests I don't think this could be used significantly. Most guests appear to be stuck close in the middle.
+
+## TF-IDF Analysis
+
+I think the best way we can identify a guest is by the specific words or phrases they use. As I mentioned in the Introduction, I know that Dr. Rhonda Patrick will probably bring up sulfurophane. So, I will be performing a TF-IDF analysis on the words used in all of the episodes. A TF-IDF analysis gives us a measure of how important a word is within a document in relation to a collection of documents. I want to see if we can tie some terms to specific guests across their episodes and in comparison to all other episodes.
+
+I do not think that I will be able to view the TF-IDF charts for all guests, but hopefully I can spot some trends for a few which will indicate some speech patterns.
+
+### Bigram TF-IDF Analysis
+
+I will be starting this analysis with a Bigram analysis. I want to see if any guests have two-word phrases they tend to utilize often. Two-word phrases are important because there are many individual words that we all use, but their relative importance can vary depending on the context they are in.
+
+Below I am building out two datasets. One which gives us a TF-IDF score at the guest level in comparison to all other guests, and the other at the episode level in comparison to all other episodes. I am also removing some of the line breaks which are noted with '\n".
+
+```{r}
+JRE_bigrams <- JRE_Final %>% 
+  unnest_tokens(bigram, Transcript, token = "ngrams", n = 2)
+JRE_bigrams <- JRE_bigrams %>%
+      separate(bigram, c("word1", "word2"), sep = " ") 
+JRE_bigrams <- JRE_bigrams %>% 
+  filter(word1 != '\n')
+JRE_bigrams <- JRE_bigrams %>% 
+  filter(word2 != '\n')
+Filter_JRE <- JRE_bigrams %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+bigrams_united <- Filter_JRE %>%
+  unite(bigram, word1, word2, sep = " ")
+bigram_tf_idf_episode <- bigrams_united %>%
+  count(Episode_Name, bigram) %>%
+  bind_tf_idf(bigram, Episode_Name, n) %>%
+  arrange(desc(tf_idf))
+bigram_tf_idf_guest <- bigrams_united %>%
+  count(Guest, bigram) %>%
+  bind_tf_idf(bigram, Guest, n) %>%
+  arrange(desc(tf_idf))
+```
+
+#### Guest Bigram Importance
+
+Below I have pulled up the top 10 most important bigrams for four guests. I chose the guests primarily based on how many times they appeared on the show, but I also was just curious as to what terms would show up for David Goggins since his episode was so proportionally negative.
+
+```{r}
+
+bigram_tf_idf_guest %>% 
+  filter(Guest %in% c("Dr. Rhonda Patrick","Duncan Trussell","Joey Diaz","David Goggins")) %>%
+  group_by(Guest) %>% 
+  slice_max(order_by=tf_idf, n=10, with_ties=FALSE) %>% 
+  ggplot(aes(x=tf_idf, y=reorder(bigram, tf_idf), fill=Guest)) +
+  geom_bar(stat='identity',show.legend = FALSE) +
+  facet_wrap(~Guest, scales="free") +
+  ylab("Bigram") +
+  xlab("TF-IDF")
+```
+
+The thing that has caught my eye in these charts is Dr. Rhonda Patrick's top ten terms. The term Sulfurophane is no where to be seen. However, 'broccoli sprouts' is, and broccoli sprouts is a cruciferous vegetable which produces sulfurophane.
+
+Next I want to see how prominent Dr. Rhonda Patrick's terms appear across all of her episodes.
+
+#### Episode Bigram Importance - Dr. Rhonda Patrick
+
+For these charts I used the data set I created with TF-IDF scores at the episode level in comparison to all other episodes.
+
+I wish I could view these charts for all guests, but there are simply too many. We will focus on Dr. Rhonda Patrick.
+
+```{r}
+bigram_tf_idf_episode %>% 
+  filter(Episode_Name %in% c("#901 - Dr. Rhonda Patrick","#1178 - Dr. Rhonda Patrick","#1474 - Dr. Rhonda Patrick")) %>%
+  group_by(Episode_Name) %>% 
+  slice_max(order_by=tf_idf, n=10, with_ties=FALSE) %>% 
+  ggplot(aes(x=tf_idf, y=reorder(bigram, tf_idf), fill=Episode_Name)) +
+  geom_bar(stat='identity',show.legend = FALSE) +
+  facet_wrap(~Episode_Name) +
+  ylab("Bigram") +
+  xlab("TF-IDF")
+```
+
+What we can see above is that the bigram 'broccoli sprouts' is a relatively important term within two of Dr. Rhonda Patrick's episodes.
+
+This makes me think it is possible to track a guest based on bigrams, but I do wish there were more than just one common bigram.
+
+### Single-Word TF-IDF Analysis
+
+We will now take a look at the relative importance of individual words within the transcripts to different guests and within episodes. We no longer care about *word combinations*, just the individual words.
+
+#### Guest Word Importance
+
+I pulled up the same guests we saw before so that it is easy to compare. I see that 23andme is an important term to David Goggins, but that is likely the result of an ad on the show.
+
+Again, I would like to focus on Dr. Rhonda Patrick. There is significant consistency with the bigrams we saw previously, and the term 'sulforaphane' has finally appeared.
+
+```{r}
+words_by_episode %>%
+  filter(!word %in% stop_words$word) %>%
+  count(Guest, word) %>% 
+  bind_tf_idf(word, Guest, n) %>% 
+  filter(Guest %in% c("Dr. Rhonda Patrick","Duncan Trussell","Joey Diaz","David Goggins")) %>%
+  group_by(Guest) %>% 
+  slice_max(order_by=tf_idf, n=10, with_ties=FALSE) %>% 
+  ggplot(aes(x=tf_idf, y=reorder(word, tf_idf), fill=Guest)) +
+  geom_bar(stat='identity',show.legend = FALSE) +
+  facet_wrap(~Guest, scales="free") +
+  ylab("Word") +
+  xlab("TF-IDF")
+```
+
+I'm starting to think that focusing on individual words is the better route to go when trying to predict who the guest is as I imagine that individual guests often speak about the same topics across multiple episodes/converstaions, but the way they arrive at specific terms will vary wildly. Bigrams, or other n-grams, could silo us in to specific pathways to actually important terms.
+
+#### Episode Word Importance - Dr. Rhonda Patrick
+
+Just like we did before, I want to focus on Dr. Rhonda Patrick.
+
+This time I have put everything on the saem scale so that is easier to find common terms.
+
+```{r}
+words_by_episode %>%
+  count(Episode_Name, word) %>% 
+  bind_tf_idf(word, Episode_Name, n) %>% 
+  filter(Episode_Name %in% c("#901 - Dr. Rhonda Patrick","#1178 - Dr. Rhonda Patrick","#1474 - Dr. Rhonda Patrick")) %>%
+  group_by(Episode_Name) %>% 
+  slice_max(order_by=tf_idf, n=10, with_ties=FALSE) %>% 
+  ggplot(aes(x=tf_idf, y=reorder(word, tf_idf), fill=Episode_Name)) +
+  geom_bar(stat='identity',show.legend = FALSE) +
+  facet_wrap(~Episode_Name) +
+  ylab("Word") +
+  xlab("TF-IDF")
+```
+
+We can see that the term 'sulforaphane' is repeatedly used, as are 'vitamin' and 'sprouts'.
+
+## Analysis Conclusions
+
+### Sentiment
+
+While some guests tend be on episodes with higher sentiment scores, and other guests tend to be on episodes with lower scores, I do not have high confidence that an episode's sentiment score will be a great indicator of who the guest is. However, I will be including in the training dataset, because I do not think it will hurt to test it out.
+
+### TF-IDF
+
+I think the number one thing we have learned here is that there do exist terms which tend to be more specific or important to individual Guests, at least relatively. I was right about Dr. Rhonda Patrick's usage of the word 'sulforaphane'. However, that does not mean TF-IDF scores for specific words will definitely be good predictors of who the guest is, but I will absolutely be including them in my model
+
+# Building a Model Predicting Guest
+With our data exploration & text analysis complete, I think we should take a swing at a model predicting the Guest. I am going to try to incorporate sentiment values & TF-IDF scores into this model
+### Readying the Data
+
+Below I am preparing the data. I only want to train this model on episodes with guests who have been on at least 2 episodes. If a guess does not exist in the training data set, it will not be possible to predict them in the testing data set.
+
+```{r}
+
+Data_For_Model <- merge(x = JRE_Final, y = guests_counted, by = "Guest") %>%
+  filter(Num_Appearances >1) %>%
+  select(Episode_Name, Transcript,Guest)
+
+Data_For_Model <- Data_For_Model %>%
+  mutate(Transcript = gsub('\r\n',' ',Transcript))
+Data_For_Model$Guest <- factor(Data_For_Model$Guest)
+head(Data_For_Model)
+```
+
+### Prepping the training & testing data sets
+
+We are now splitting the data into training & testing data sets. We are stratifying on Guest.
+
+```{r, message = FALSE, warning=FALSE}
+
+set.seed(123)
+choco_split <- initial_split(Data_For_Model, 
+                             strata = Guest, prop=.8)
+choco_train <- training(choco_split)
+choco_test <- testing(choco_split)
+
+```
+
+### Performing a 10-fold Cross Validation
+
+Here we are performing a 10-fold Cross Validation. I am also building out a grid of variables for our model to tune on.
+
+```{r, message = FALSE}
+set.seed(234)
+choco_folds <- vfold_cv(choco_train, 
+                        strata = Guest, v=10)
+
+rf_grid <- expand_grid(mtry = 5:10,
+                       trees = c(500, 1000,1500,2000))
+```
+
+### Building a recipe for our data's preparation
+
+The Transcripts need to be tokenized, stopwords should be removed, sentiment scores should be assigned, and tf_idf scores need to be assigned.
+
+A sample of the data's new format can be seen below.
+
+```{r}
+
+choco_rec <-
+  recipe(Guest ~ Transcript, 
+         data = choco_train) %>%
+   step_tokenize(Transcript) %>%
+   step_stopwords(Transcript) %>% 
+  step_mutate(text_lexicon = Transcript) %>%
+
+  step_word_embeddings(text_lexicon, embeddings = lexicon_afinn(),prefix="afinn") %>% 
+  step_tfidf(Transcript)
+
+rogan_prep <- prep(choco_rec)
+head(juice(rogan_prep))
+```
+
+### Declaring the models
+
+I'd like to test out a tuned Random Forest model, and an untuned Random Forest model. This is only because I have had success with Random Forest models right out of the box, and I'd like to see if tuning one will really improve it all that much.
+
+You can see the model specifications & workflow for the tuned model below.
+
+```{r}
+rf_spec_tuned <- rand_forest(mtry = tune(), 
+                            trees = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "impurity")
+
+volcano_wf_tuned <- workflow() %>%
+  add_recipe(choco_rec) %>%
+  add_model(rf_spec_tuned)
+
+rf_spec <- rand_forest(trees=1500) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+volcano_wf <- workflow() %>%
+  add_recipe(choco_rec) %>%
+  add_model(rf_spec)
+
+rf_spec_tuned
+```
+
+Below we are fitting our resamples for the untuned model & tuning the grid we specified previously for the tuned model. I am also specifying the metrics I want to use to measure the performance of the models.
+
+```{r, message = FALSE}
+my_reg_metrics <- metric_set(yardstick::accuracy, yardstick::specificity, yardstick::sensitivity)
+bos_tree_rs <- volcano_wf_tuned %>% 
+                    tune_grid(resamples = choco_folds,
+                              grid = rf_grid,
+                              control = control_resamples(save_pred = TRUE),
+                              metrics= my_reg_metrics)
+
+volcano_res <- fit_resamples(
+  volcano_wf,
+  resamples = choco_folds,
+  control = control_resamples(save_pred = TRUE),
+  metrics = my_reg_metrics
+)
+```
+
+### Plotting the Tuned Random Forest Model Metrics
+
+The accuracy of our best tuned model is typically just above .2
+
+```{r}
+df_p <- bos_tree_rs %>%
+            collect_metrics() 
+df_p %>%
+    ggplot(aes(x = mtry, y = mean, color = factor(trees))) +
+    geom_line(alpha = 0.6) +
+    geom_point() +
+    facet_wrap(~ .metric, scales = "free", nrow = 2) +
+    scale_color_brewer("trees", palette = "Set1")
+```
+
+### Untuned Model Metrics
+
+Interesting, our untuned model seems to have performed the best. It's accuracy & sensitivity is notably higher than the tuned model.
+
+```{r}
+collect_metrics(volcano_res)
+```
+
+
+
+### Selecting a Model
+
+I will be moving forward with the untuned Random Forest model, as it did perform the best on the training data set in comparison to the tuned model.I really expected the tuned model to have the best performance, but that is not the case.
+
+### Testing our Final Model
+
+Below I am fitting the Untuned model on the training dataset & running it on the testing data set.
+
+```{r,warning=FALSE}
+set.seed(236)
+ final_fitted <- volcano_wf %>% 
+                     fit(choco_train)
+
+pred <- predict(final_fitted, choco_test)
+choco_test$pred <- pred$.pred_class
+choco_test <- choco_test %>%
+  mutate(Score = ifelse(pred==Guest,1,0))
+accuracy = sum(choco_test$Score)/length(choco_test$Score)
+print(paste0("The Model's Accuracy on the Test Data set is ",accuracy))
+```
+
+Within the context of Multi-class Classification, the formula for Accuracy is Total Positives / All Predictions (which I believe can also be called *Precision*). When we run the model on the test data our Accuracy does decrease. As I run this over & over, I tend to get different accuracy scores from .16 & .24.
+
+# Conclusion
+
+Can we predict the the guest based on the transcript alone? Our current results indicate that we typically cannot. The untuned model performed better than I had expected on the training data set, but I wish we did not have such a steep drop when moving to the testing data set. Right now, I can't confidently state that we can predict who the guest is, and based on some of the analysis we did earlier as well as this modeling, Joe Rogan never has the same conversation twice.
+
+However, I really wonder what the results would look like with a larger data set. Maybe if I had been able to get the transcripts for 1,000 episodes that data would tell a different story. I am not optimistic that different types of models would perform, such as a Support Vector Classifier, but they could be worth a try.
+
+# Closing Thoughts
+
+This was an extremely interesting data set to work with. Like I said before, I wish it were bigger. I wish I had more transcripts, and I wish I had more information about the guests. It would have been great to have every guest's political party & profession listed.
+
+Also, I wish my laptop had more RAM. There were certain methods I attempted which simply crashed RStudio. I would have loved to do some topic modeling on some episodes, and it would have been interesting to see the primary topics Joe Rogan likes to focus on across many episodes. Once I buy a new laptop I might return to this data set, and hopefully add to it.
+
+
